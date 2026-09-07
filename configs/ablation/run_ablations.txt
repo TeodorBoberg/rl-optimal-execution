@@ -1,0 +1,29 @@
+REM ---- ablate: impact ----
+python run.py --config configs/ablation/no_impact.yaml --timesteps 10000000
+copy models\best_model.zip models\ablate_no_impact.zip
+python evaluation\backtest_repeated_parallel.py --config configs/ablation/no_impact.yaml --model-path models\ablate_no_impact.zip --n-runs 3 --n-episodes 1000
+
+REM ---- ablate: pacing ----
+python run.py --config configs/ablation/no_pacing.yaml --timesteps 10000000
+copy models\best_model.zip models\ablate_no_pacing.zip
+python evaluation\backtest_repeated_parallel.py --config configs/ablation/no_pacing.yaml --model-path models\ablate_no_pacing.zip --n-runs 3 --n-episodes 1000
+
+REM ---- ablate: regime ----
+python run.py --config configs/ablation/no_regime.yaml --timesteps 10000000
+copy models\best_model.zip models\ablate_no_regime.zip
+python evaluation\backtest_repeated_parallel.py --config configs/ablation/no_regime.yaml --model-path models\ablate_no_regime.zip --n-runs 3 --n-episodes 1000
+
+REM ---- ablate: news ----
+python run.py --config configs/ablation/no_news.yaml --timesteps 10000000
+copy models\best_model.zip models\ablate_no_news.zip
+python evaluation\backtest_repeated_parallel.py --config configs/ablation/no_news.yaml --model-path models\ablate_no_news.zip --n-runs 3 --n-episodes 1000
+
+REM ---- ablate: adverse_selection ----
+python run.py --config configs/ablation/no_adverse_selection.yaml --timesteps 10000000
+copy models\best_model.zip models\ablate_no_adverse_selection.zip
+python evaluation\backtest_repeated_parallel.py --config configs/ablation/no_adverse_selection.yaml --model-path models\ablate_no_adverse_selection.zip --n-runs 3 --n-episodes 1000
+
+REM ---- ablate: hold ----
+python run.py --config configs/ablation/no_hold.yaml --timesteps 10000000
+copy models\best_model.zip models\ablate_no_hold.zip
+python evaluation\backtest_repeated_parallel.py --config configs/ablation/no_hold.yaml --model-path models\ablate_no_hold.zip --n-runs 3 --n-episodes 1000

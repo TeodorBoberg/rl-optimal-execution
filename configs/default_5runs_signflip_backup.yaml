@@ -1,0 +1,97 @@
+# ============================================================
+# Central config
+# ============================================================
+# Updated with real-data calibrations from tick-data analysis:
+#   - data.path / execution.total_steps / step_duration_min: switched to
+#     real 1-minute bars (14-ticker reliable subset -- 5 tickers excluded
+#     due to a diagnosed EQUS.MINI venue-coverage data quality issue)
+#   - market.avg_spread_bps: 5.0 -> 5.9 (real, triangulated across two
+#     independent methodologies -- confirms the original assumption was
+#     already close)
+#   - market.impact_exponent: 0.6 -> 0.65 (validated against real
+#     classified trade data, isolated-impact-component measurement)
+#   - market.hawkes_decay: 0.3 -> 0.0273 (real decay rate of trading
+#     activity clustering, measured via autocorrelation of real 1-min
+#     volume deviations; safety-checked against saturation)
+
+data:
+  source: "csv"
+  path: "data/combined_1m_clean.csv"
+  test_frac: 0.2   # fraction of each ticker's days held out, chronologically, for eval/backtest
+
+market:
+  avg_daily_volume: 5_000_000
+  avg_spread_bps: 5.9
+  volatility_per_min: 0.0003
+  # Multi-factor impact model
+  eta_temporary: 0.0005   # NOTE: real-data back-solving attempted and rejected --
+                          # naive extrapolation from tiny real trade sizes to the
+                          # simulator's much larger child-order participation scale
+                          # produced an implausible ~868x value. Absolute level
+                          # calibration needs real block-trade data we don't have;
+                          # left at the original default, honestly disclosed.
+  gamma_permanent: 0.00005
+  impact_exponent: 0.65          # real-data validated (was 0.6)
+  spread_impact_exp: 0.3
+  vol_impact_exp: 0.4
+  # Reactive layer
+  spread_widening_factor: 2.0
+  book_depth_levels: 10
+  book_replenish_halflife: 5
+  max_participation_rate: 0.25
+  # Adverse selection
+  adverse_selection_factor: 0.3
+  # Regime switching
+  calm_vol: 0.0002
+  volatile_vol: 0.0012
+  prob_calm_to_volatile: 0.02
+  prob_volatile_to_calm: 0.05
+  # Hawkes process
+  hawkes_baseline: 10.0         # NOTE: not fit from real data -- this simulator's
+                                 # Hawkes mechanism is self-referential (driven by
+                                 # the SIMULATED order's own size, not independent
+                                 # real order arrivals), so baseline/alpha don't have
+                                 # as direct a real-data mapping as decay does.
+  hawkes_alpha: 0.6             # NOTE: same caveat as hawkes_baseline above.
+  hawkes_decay: 0.0273          # real-data calibrated (was 0.3) -- measured via
+                                 # autocorrelation of real 1-min volume deviations
+                                 # from the expected intraday profile. Safety-checked
+                                 # against liquidity_multiplier saturation under both
+                                 # typical and realistic aggressive-trading scenarios.
+  # News windows
+  news_spread_multiplier: 5.0
+  news_probability: 0.02
+  # Alpha signal (noisy proxy for a forecasting model's output)
+  alpha_horizon_steps: 6        # look-ahead window, in steps (~6 min at 1-min bars)
+  alpha_noise_std: 2.0          # higher = noisier; 2.0 ~= 60-65% directional accuracy
+  alpha_decay: 0.9              # how much true forward return bleeds into the signal
+  alpha_reward_weight: 0.3      # weight on alpha_captured term in reward — tune this first
+
+execution:
+  total_shares: 100_000
+  total_steps: 390              # 1-min bars, 6.5hr regular session (was 78 for 5-min bars)
+  step_duration_min: 1          # was 5
+  max_participation_rate: 0.25
+  risk_aversion: 1.0e-4
+
+training:
+  total_timesteps: 5_000_000
+  n_envs: 8
+  n_envs_fast: 64
+  n_steps: 512
+  batch_size: 512
+  n_epochs: 10
+  learning_rate: 1.0e-4
+  gamma: 0.99
+  ent_coef: 0.01
+  clip_range: 0.2
+  seed: 42
+  log_dir: "logs/"
+  model_dir: "models/"
+  eval_freq: 5_000
+  n_eval_episodes: 20
+
+evaluation:
+  n_episodes: 100
+  benchmarks: ["twap", "vwap", "ac"]
+  plot_dir: "evaluation/plots/"

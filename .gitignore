@@ -1,0 +1,57 @@
+# ============================================================
+# CRITICAL: keep these out of the repo
+# ============================================================
+
+# Market data. Databento data is licensed and cannot be
+# redistributed. Also ~20GB+, far beyond GitHub's limits.
+data/
+*.csv
+
+# Trained models (~1.7MB each, and not reproducible artifacts)
+models/
+*.zip
+
+# Secrets. The Databento API key lives in an environment
+# variable, but guard against any local override files.
+.env
+*.key
+secrets.yaml
+config_local.yaml
+
+# ============================================================
+# Python
+# ============================================================
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ============================================================
+# Outputs and logs
+# ============================================================
+logs/
+evaluation/plots/
+evaluation/traces/
+evaluation/*.csv
+evaluation/*.png
+tensorboard/
+*.log
+
+# ============================================================
+# OS / editor
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp

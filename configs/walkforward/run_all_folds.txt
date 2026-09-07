@@ -1,0 +1,15 @@
+python run.py --config configs/walkforward/fold0.yaml --timesteps 10000000
+copy models\best_model.zip models\wf_fold0.zip
+python evaluation\backtest_repeated.py --config configs/walkforward/fold0.yaml --model-path models\wf_fold0.zip --n-runs 3 --n-episodes 1000
+
+python run.py --config configs/walkforward/fold1.yaml --timesteps 10000000
+copy models\best_model.zip models\wf_fold1.zip
+python evaluation\backtest_repeated.py --config configs/walkforward/fold1.yaml --model-path models\wf_fold1.zip --n-runs 3 --n-episodes 1000
+
+python run.py --config configs/walkforward/fold2.yaml --timesteps 10000000
+copy models\best_model.zip models\wf_fold2.zip
+python evaluation\backtest_repeated.py --config configs/walkforward/fold2.yaml --model-path models\wf_fold2.zip --n-runs 3 --n-episodes 1000
+
+python run.py --config configs/walkforward/fold3.yaml --timesteps 10000000
+copy models\best_model.zip models\wf_fold3.zip
+python evaluation\backtest_repeated.py --config configs/walkforward/fold3.yaml --model-path models\wf_fold3.zip --n-runs 3 --n-episodes 1000
