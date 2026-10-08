@@ -71,6 +71,7 @@ market:
   passive_fill_prob: 0.4
 
 execution:
+  drawdown_stop_frac: null
   total_shares: 100_000
   total_steps: 390             # 1-min bars, 6.5hr regular session (was 78 for 5-min bars)
   step_duration_min: 1          # was 5

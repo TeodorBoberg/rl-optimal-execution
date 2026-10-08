@@ -1,0 +1,47 @@
+REM ---- fold 0, seed 42 ----
+python run.py --config configs/walkforward/fold0.yaml --timesteps 10000000 --train-seed 42
+copy models\best_model.zip models\wf_f0_s42.zip
+
+REM ---- fold 0, seed 43 ----
+python run.py --config configs/walkforward/fold0.yaml --timesteps 10000000 --train-seed 43
+copy models\best_model.zip models\wf_f0_s43.zip
+
+REM ---- fold 0, seed 44 ----
+python run.py --config configs/walkforward/fold0.yaml --timesteps 10000000 --train-seed 44
+copy models\best_model.zip models\wf_f0_s44.zip
+
+REM ---- fold 1, seed 42 ----
+python run.py --config configs/walkforward/fold1.yaml --timesteps 10000000 --train-seed 42
+copy models\best_model.zip models\wf_f1_s42.zip
+
+REM ---- fold 1, seed 43 ----
+python run.py --config configs/walkforward/fold1.yaml --timesteps 10000000 --train-seed 43
+copy models\best_model.zip models\wf_f1_s43.zip
+
+REM ---- fold 1, seed 44 ----
+python run.py --config configs/walkforward/fold1.yaml --timesteps 10000000 --train-seed 44
+copy models\best_model.zip models\wf_f1_s44.zip
+
+REM ---- fold 2, seed 42 ----
+python run.py --config configs/walkforward/fold2.yaml --timesteps 10000000 --train-seed 42
+copy models\best_model.zip models\wf_f2_s42.zip
+
+REM ---- fold 2, seed 43 ----
+python run.py --config configs/walkforward/fold2.yaml --timesteps 10000000 --train-seed 43
+copy models\best_model.zip models\wf_f2_s43.zip
+
+REM ---- fold 2, seed 44 ----
+python run.py --config configs/walkforward/fold2.yaml --timesteps 10000000 --train-seed 44
+copy models\best_model.zip models\wf_f2_s44.zip
+
+REM ---- fold 3, seed 42 ----
+python run.py --config configs/walkforward/fold3.yaml --timesteps 10000000 --train-seed 42
+copy models\best_model.zip models\wf_f3_s42.zip
+
+REM ---- fold 3, seed 43 ----
+python run.py --config configs/walkforward/fold3.yaml --timesteps 10000000 --train-seed 43
+copy models\best_model.zip models\wf_f3_s43.zip
+
+REM ---- fold 3, seed 44 ----
+python run.py --config configs/walkforward/fold3.yaml --timesteps 10000000 --train-seed 44
+copy models\best_model.zip models\wf_f3_s44.zip

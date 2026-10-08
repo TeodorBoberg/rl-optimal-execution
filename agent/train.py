@@ -73,6 +73,13 @@ def train(cfg: dict, total_timesteps: int = None):
 
     train_df, test_df = load_and_split_data(cfg)
 
+        # Pick the best checkpoint on the end of the TRAINING window, never on test.
+    val_frac = cfg["data"].get("val_frac")
+    if val_frac:
+        train_df, val_df = train_test_split_days(train_df, test_frac=val_frac)
+    else:
+        val_df = test_df
+
     env = make_vec_env(
         make_env_fn(cfg, train_df, seed=seed, side="random"),
         n_envs=n_envs,

@@ -35,10 +35,23 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def run_benchmark_episode(env: ExecutionEnv, strategy: str, side: str) -> dict:
-    """Run one episode of a classical benchmark."""
+def run_benchmark_episode(env: ExecutionEnv, strategy: str, side: str,
+                           seed: int = None, urgency: float = 0.5) -> dict:
+    """Run one episode of a classical benchmark.
+
+    `seed` must be passed for paired evaluation. Without it env.reset()
+    samples a fresh day, so every strategy would see a different ticker
+    and date and nothing could be paired on episode id.
+
+    `urgency` must match the RL episode's. It used to be left unset, so the
+    benchmarks in episode 0 ran with default_urgency=None -- which draws a
+    random urgency from the RNG BEFORE the day is drawn, and so put episode
+    0's benchmarks on a different day from the agent. From episode 1 on the
+    value left behind by run_rl_episode (0.5) happened to be used.
+    """
     env.default_side = side
-    obs, _ = env.reset()
+    env.default_urgency = urgency
+    obs, _ = env.reset(seed=seed)
     volume_profile = load_empirical_volume_profile(n_steps=env.total_steps)
     done = False
     slippages = []
@@ -76,16 +89,19 @@ def run_benchmark_episode(env: ExecutionEnv, strategy: str, side: str) -> dict:
         "ticker": getattr(env, "ticker", None),
         "total_cost_dollars": env.total_cost,
         "is_bps": env.total_cost / (env.total_shares * env.arrival_price + 1e-9) * 10_000,
+        "is_signed_bps": env.total_cost_signed / (env.total_shares * env.arrival_price + 1e-9) * 10_000,
         "avg_slippage_bps": float(np.mean(slippages)),
         "avg_participation_rate": float(np.mean(participations)),
         "unfilled_fraction": env.remaining / env.total_shares,
     }
 
 
-def run_rl_episode(env, predict_fn, side: str, urgency: float = 0.5) -> dict:
+def run_rl_episode(env, predict_fn, side: str, urgency: float = 0.5,
+                    seed: int = None) -> dict:
+    """`seed` must match the benchmarks' seed for a paired comparison."""
     env.default_side = side
     env.default_urgency = urgency
-    obs, _ = env.reset()
+    obs, _ = env.reset(seed=seed)
     done = False
     slippages, participations = [], []
     while not done:
@@ -99,6 +115,7 @@ def run_rl_episode(env, predict_fn, side: str, urgency: float = 0.5) -> dict:
         "ticker": getattr(env, "ticker", None),
         "total_cost_dollars": env.total_cost,
         "is_bps": env.total_cost / (env.total_shares * env.arrival_price + 1e-9) * 10_000,
+        "is_signed_bps": env.total_cost_signed / (env.total_shares * env.arrival_price + 1e-9) * 10_000,
         "avg_slippage_bps": float(np.mean(slippages)),
         "avg_participation_rate": float(np.mean(participations)),
         "unfilled_fraction": env.remaining / env.total_shares,
@@ -112,7 +129,7 @@ def run_backtest(cfg, model_path, n_episodes, seed=99999):
     print(f"Loading model from {model_path}...")
     # Strip .pt extension if passed — SB3 uses .zip
     load_path = model_path.replace("_best.pt", "").replace(".pt", "")
-    model_sb3 = PPO.load(load_path, device="cpu")
+    model_sb3 = PPO.load(load_path)
     def predict_fn(obs):
         action, _ = model_sb3.predict(obs, deterministic=True)
         return action
@@ -151,19 +168,32 @@ def run_backtest(cfg, model_path, n_episodes, seed=99999):
     sides = ["buy", "sell"]
     results = []
 
+    # PAIRED EVALUATION.
+    #
+    # The episode loop is outermost and every strategy is reset with the
+    # SAME per-episode seed. Because ExecutionEnv.reset(seed=s) rebuilds
+    # self.rng and hands that same generator to a fresh MarketSimulator,
+    # this gives every strategy an identical day, ticker, urgency, price
+    # path and regime sequence -- so the only difference between them is
+    # the strategy itself.
+    #
+    # The previous structure looped strategy-outermost off one continuous
+    # RNG stream, so episode 5 was a different ticker and day for every
+    # strategy. Mean comparisons were still valid (all strategies sampled
+    # the same distribution), but anything that PAIRED on episode was
+    # silently comparing unrelated episodes: paired significance tests,
+    # and any per-ticker breakdown. Measured alignment under the old
+    # scheme was 7.7% -- exactly chance for 13 tickers.
     for side in sides:
-        # Benchmarks
-        for strategy in strategies:
-            desc = f"{strategy.upper()} ({side})"
-            for ep in tqdm(range(n_episodes), desc=desc):
-                row = run_benchmark_episode(env, strategy, side)
+        for ep in tqdm(range(n_episodes), desc=f"paired ({side})"):
+            ep_seed = seed + ep
+
+            for strategy in strategies:
+                row = run_benchmark_episode(env, strategy, side, seed=ep_seed)
                 row["episode"] = ep
                 results.append(row)
 
-        # RL agent
-        desc = f"RL_FAST ({side})"
-        for ep in tqdm(range(n_episodes), desc=desc):
-            row = run_rl_episode(env, predict_fn, side)
+            row = run_rl_episode(env, predict_fn, side, seed=ep_seed)
             row["episode"] = ep
             results.append(row)
 

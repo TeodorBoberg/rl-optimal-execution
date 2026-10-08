@@ -46,11 +46,51 @@ class MarketConfig:
     # matches the previous linear model there -- this changes the SHAPE
     # (how impact scales with size) without importing an unsupported level.
     permanent_impact_exponent: float = 1.0
+    # How permanent impact accumulates over the ORDER (metaorder).
+    #
+    # "per_fill" (original): every fill moves the price permanently by
+    #   gamma_permanent * participation ** permanent_impact_exponent.
+    #   With the concave exponent (0.18) a tiny fill moves the price almost
+    #   as much as a large one, so total permanent impact grows with the
+    #   NUMBER of fills. Batch 1 showed this is what produced the agent's
+    #   entire edge over TWAP: TWAP's 390 small fills paid 8.7bps of
+    #   permanent cost against the agent's 2.3bps, while on spread and
+    #   temporary impact TWAP was cheaper. The exponent was measured on
+    #   individual tape prints; applying it per child fill and summing is
+    #   what creates the fragmentation penalty.
+    #
+    # "cumulative": the order's own permanent displacement is a function of
+    #   how much of it has executed so far,
+    #       D(X) = G(X) * P0,   G(X) = g_ref * (X / (ref_frac * ADV)) ** delta
+    #   (delta = 0.5 is the square-root law for metaorders). Each fill pays
+    #   the average displacement over its own slice, so total permanent cost
+    #   is the integral of G from 0 to the order size -- the SAME for every
+    #   schedule that completes the order. Its level therefore cannot change
+    #   any comparison between strategies, which sidesteps the fact that the
+    #   level is not measurable from tape data.
+    permanent_impact_mode: str = "per_fill"
+    permanent_cum_bps_at_ref: float = 7.5   # displacement after ref_frac of ADV has executed
+    permanent_cum_ref_frac: float = 0.05
+    permanent_cum_exponent: float = 0.5
+    # What temporary impact measures participation against.
+    #
+    # "average" (original): qty / (ADV / steps_per_day). The same trade costs
+    #   the same whether this minute is busy or quiet, so following volume
+    #   buys nothing and a smooth clock-time schedule (Almgren-Chriss) is
+    #   close to optimal -- Stage 1 confirmed the agent cannot beat it there.
+    # "bar": qty / this minute's actual volume, the standard practitioner
+    #   form (impact scales with the share of the volume actually trading).
+    #   Busy minutes become cheap and quiet ones expensive, which is the
+    #   situation volume-following and adaptive strategies exist for.
+    impact_volume_ref: str = "average"
     impact_exponent: float = 0.6          # empirical: ~0.5-0.7 in practice
     spread_impact_exp: float = 0.3        # spread contribution to impact
     vol_impact_exp: float = 0.4           # vol contribution to impact
     # Reactive layer
-    spread_widening_factor: float = 2.0
+    # (spread_widening_factor removed: it was measured at ~1.69 from 3.5M
+    # level-consuming trades but never read anywhere in the simulator, so
+    # changing it had no effect. Reverting 1.69 -> 2.0 gave byte-identical
+    # results, which is how it was found.)
     book_depth_levels: int = 10
     book_replenish_halflife: int = 5
     max_participation_rate: float = 0.25
@@ -457,7 +497,39 @@ class MarketSimulator:
         self.day_data = day_data.reset_index(drop=True)
         self.step_idx = 0
         self.permanent_impact_acc = 0.0
-        self.mid_price = float(self.day_data.loc[0, "close"])
+
+        # Reference price series, used for the price path and the alpha
+        # signal. Prefer the bar MIDPOINT over the last trade price.
+        #
+        # `close` is the last TRADE of the minute, so it sits at the bid or
+        # the ask roughly at random -- bid-ask bounce. That injects
+        # artificial mean reversion at one-bar horizon: with a 2.13bps
+        # calibrated spread the half-spread is ~1.07bps against a typical
+        # 1-minute return of ~4bps, so a meaningful share of short-horizon
+        # variance is spurious. It is exploitable, because the agent
+        # observes (mid_price - arrival_price)/arrival_price: a low reading
+        # is disproportionately likely to be a bid print about to revert, so
+        # a buy policy can learn to trade down-bounces for an edge that does
+        # not exist live. The midpoint has no bounce by construction.
+        if {"bid", "ask"}.issubset(self.day_data.columns):
+            ref = (self.day_data["bid"].astype(float)
+                   + self.day_data["ask"].astype(float)) / 2.0
+            # Fall back to close wherever the quote is missing or degenerate
+            bad = ~np.isfinite(ref) | (ref <= 0)
+            if bad.any():
+                ref = ref.where(~bad, self.day_data["close"].astype(float))
+            self.ref_price = ref.values.astype(float)
+        else:
+            self.ref_price = self.day_data["close"].values.astype(float)
+
+        self.mid_price = float(self.ref_price[0])
+        # Cumulative permanent-impact state (used when
+        # permanent_impact_mode == "cumulative"). base_mid is the price path
+        # WITHOUT the order's own impact; mid_price = base_mid + own_disp.
+        self.p0 = self.mid_price
+        self.base_mid = self.mid_price
+        self.own_disp = 0.0
+        self.cum_executed = 0.0
         self.regime_model.reset()
         self.hawkes.reset()
         self.spread_model.reset()
@@ -478,7 +550,7 @@ class MarketSimulator:
         time, similar to a real weak alpha source — if it's too clean the
         agent will learn to blindly trust it and won't generalize.
         """
-        closes = self.day_data["close"].values.astype(float)
+        closes = self.ref_price
         n = len(closes)
         horizon = self.cfg.alpha_horizon_steps
 
@@ -541,6 +613,43 @@ class MarketSimulator:
             rng=self.rng,
         )
 
+    # ---- cumulative permanent impact -------------------------------
+    @property
+    def cumulative_mode(self) -> bool:
+        return getattr(self.cfg, "permanent_impact_mode", "per_fill") == "cumulative"
+
+    def _cum_scale(self) -> float:
+        return max(self.cfg.permanent_cum_ref_frac * self.cfg.avg_daily_volume, 1.0)
+
+    def cum_G(self, x: float) -> float:
+        """Permanent displacement, as a fraction of P0, after x shares."""
+        a = self._cum_scale()
+        return (self.cfg.permanent_cum_bps_at_ref / 1e4) * (max(x, 0.0) / a) ** self.cfg.permanent_cum_exponent
+
+    def cum_H(self, x: float) -> float:
+        """Integral of G from 0 to x (shares x fraction of P0)."""
+        a = self._cum_scale()
+        d = self.cfg.permanent_cum_exponent
+        return (self.cfg.permanent_cum_bps_at_ref / 1e4) * a / (1 + d) * (max(x, 0.0) / a) ** (1 + d)
+
+    def _cum_advance(self, q: float, side: str, charge_slice: bool) -> tuple:
+        """Record q more shares of the order as executed. Moves the mid by the
+        change in displacement and returns (slice_extra_fraction,
+        displacement_change_fraction). slice_extra is what an aggressive fill
+        of q pays on top of the displacement already in the mid: the average
+        of G over its own slice minus G at the start of it."""
+        if q <= 0:
+            return 0.0, 0.0
+        x0, x1 = self.cum_executed, self.cum_executed + q
+        g0, g1 = self.cum_G(x0), self.cum_G(x1)
+        extra = ((self.cum_H(x1) - self.cum_H(x0)) / q - g0) if charge_slice else 0.0
+        sgn = 1.0 if side == "buy" else -1.0
+        self.cum_executed = x1
+        self.own_disp += sgn * (g1 - g0) * self.p0
+        self.mid_price = self.base_mid + self.own_disp
+        self.permanent_impact_acc = g1 * self.p0
+        return extra, g1 - g0
+
     def execute_passive_order(self, qty: float, side: str = "buy") -> FillResult:
         """
         Execute a passive (resting limit) order for this step and return a
@@ -585,6 +694,13 @@ class MarketSimulator:
 
         row = self.day_data.loc[self.step_idx]
         step_volume = max(1, int(row["volume"]))
+
+        if self.cumulative_mode:
+            # Passive fills are part of the order too: they move the price
+            # permanently (otherwise resting orders would be a loophole that
+            # escapes permanent impact), but a resting order does not pay the
+            # within-slice charge an aggressive order does.
+            self._cum_advance(filled, side, charge_slice=False)
 
         return FillResult(
             filled_qty=filled,
@@ -637,21 +753,31 @@ class MarketSimulator:
         realised_vol = self.current_vol / (self.cfg.volatility_per_min + 1e-12)
 
         # Multi-factor impact
+        impact_ref_vol = (float(step_volume)
+                          if getattr(self.cfg, "impact_volume_ref", "average") == "bar"
+                          else avg_vol)
         temp_impact, perm_impact = compute_impact(
-            qty, avg_vol, current_spread_bps, realised_vol, self.cfg
+            qty, impact_ref_vol, current_spread_bps, realised_vol, self.cfg
         )
 
         # LOB execution (aggressive market order)
         if side == "buy":
             lob_price, filled_qty = self.lob.execute_aggressive(qty, force_fill=force_fill)
             exec_price = lob_price * (1 + temp_impact)
-            self.mid_price += perm_impact * arrival_price
         else:
             lob_price, filled_qty = self.lob.execute_aggressive(qty, force_fill=force_fill)
             exec_price = (2 * arrival_price - lob_price) * (1 - temp_impact)
-            self.mid_price -= perm_impact * arrival_price
 
-        self.permanent_impact_acc += abs(perm_impact * arrival_price)
+        if self.cumulative_mode:
+            extra, dg = self._cum_advance(filled_qty, side, charge_slice=True)
+            exec_price = exec_price * (1 + extra) if side == "buy" else exec_price * (1 - extra)
+            perm_impact = dg
+        else:
+            if side == "buy":
+                self.mid_price += perm_impact * arrival_price
+            else:
+                self.mid_price -= perm_impact * arrival_price
+            self.permanent_impact_acc += abs(perm_impact * arrival_price)
 
         # Adverse selection cost (always present, even on aggressive fills
         # because informed flow trades against you)
@@ -697,11 +823,18 @@ class MarketSimulator:
         self.current_vol, self.current_regime = self.regime_model.step_vol()
 
         # Price evolution: market move + permanent impact already baked in
-        prev_close = float(self.day_data.loc[max(0, self.step_idx - 1), "close"])
-        curr_close = float(row["close"])
+        prev_close = float(self.ref_price[max(0, self.step_idx - 1)])
+        curr_close = float(self.ref_price[self.step_idx])
         market_ret = (curr_close / prev_close - 1) if prev_close > 0 else 0
         noise = self.rng.normal(0, self.current_vol * np.sqrt(self.cfg.step_duration_min))
-        self.mid_price = self.mid_price * np.exp(market_ret + noise * 0.1)
+        if self.cumulative_mode:
+            # Own impact is kept additive and separate, so it is not scaled by
+            # later market moves and total permanent cost stays exactly the
+            # integral of G regardless of schedule.
+            self.base_mid = self.base_mid * np.exp(market_ret + noise * 0.1)
+            self.mid_price = self.base_mid + self.own_disp
+        else:
+            self.mid_price = self.mid_price * np.exp(market_ret + noise * 0.1)
 
         self._rebuild_lob()
 

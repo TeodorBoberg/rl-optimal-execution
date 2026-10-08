@@ -25,6 +25,10 @@ def main():
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--n-steps", type=int, default=15)
     parser.add_argument("--seed", type=int, default=99999)
+    parser.add_argument("--side", default="sell", choices=["buy", "sell"],
+                         help="Which side to trace. A policy can be healthy on one "
+                              "side and broken on the other, so match this to the "
+                              "side that actually underperformed.")
     parser.add_argument("--ticker", default=None,
                          help="Force a specific ticker (e.g. DUK, CVX) instead of whatever "
                               "the fixed seed happens to sample -- useful since QQQ (the "
@@ -52,7 +56,7 @@ def main():
     model = PPO.load(args.model_path.replace(".zip", ""))
     print("Loaded.\n")
 
-    env = ExecutionEnv(cfg, data=test_df, side="sell")
+    env = ExecutionEnv(cfg, data=test_df, side=args.side)
     env.default_urgency = 0.5
     env.reset(seed=args.seed)  # exact same seeding as run_backtest()
 

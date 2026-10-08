@@ -1,0 +1,1 @@
+overrides: market.permanent_impact_mode=cumulative

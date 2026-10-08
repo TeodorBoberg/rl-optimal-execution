@@ -73,7 +73,6 @@ def build_market_cfg(cfg: dict) -> MarketConfig:
         impact_exponent=m.get("impact_exponent", 0.6),
         spread_impact_exp=m.get("spread_impact_exp", 0.3),
         vol_impact_exp=m.get("vol_impact_exp", 0.4),
-        spread_widening_factor=m.get("spread_widening_factor", 1.5),
         book_depth_levels=m["book_depth_levels"],
         book_replenish_halflife=m["book_replenish_halflife"],
         max_participation_rate=e["max_participation_rate"],

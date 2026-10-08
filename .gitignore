@@ -55,3 +55,9 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+evaluation/*/episodes.csv
+evaluation/*/traces.csv
+evaluation/*/rl_urgency_paired.csv
+evaluation/*/urgency.csv
+evaluation/*/urgency_frontier_runs.csv

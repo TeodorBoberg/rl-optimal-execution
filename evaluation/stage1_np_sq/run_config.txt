@@ -1,0 +1,1 @@
+overrides: market.permanent_impact_mode=cumulative, reward_weights.disable_alpha_signal=true, execution.enable_passive=false, execution.action_squash=sigmoid, execution.drop_noise_obs=true
