@@ -83,8 +83,20 @@ FAMILIES = [
     ("acs0.5@", "AC live, spread-aware k=0.5", "#e87ba4"),
     ("acs1@", "AC live, spread-aware k=1", "#d55181"),
     ("acs2@", "AC live, spread-aware k=2", "#e34948"),
+    # Stage 3c: the same schedules inside the agent's guardrail (only present
+    # if batch1_eval was run with --bench-prefixes gac,gacl,gacs)
+    ("gac@", "guarded AC, time clock", "#b04a1f"),
+    ("gacl@", "guarded AC, live volume", "#2e2470"),
+    ("gacs0.5@", "guarded spread-aware k=0.5", "#a8496f"),
+    ("gacs1@", "guarded spread-aware k=1", "#9b2f57"),
+    ("gacs2@", "guarded spread-aware k=2", "#9e2a29"),
+    # Stage 3c rules distilled from the agent: guarded, volatility-aware
+    ("gacv0.5@", "rule: guarded AC live, vol-aware kv=0.5", "#6b6b00"),
+    ("gacv1@", "rule: guarded AC live, vol-aware kv=1", "#8f8f00"),
+    ("gacs1v0.5@", "rule: + spread k=1, vol kv=0.5", "#00707a"),
+    ("gacs1v1@", "rule: + spread k=1, vol kv=1", "#00949e"),
 ]
-SPREAD_AWARE = ("acs",)
+SPREAD_AWARE = ("acs", "gacs")
 
 
 def ac_curve(df_fold, prefix="ac@"):
@@ -403,7 +415,10 @@ def main():
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="Config overrides; must match the ones batch1_eval.py used "
                          "for the same --out directory.")
+    ap.add_argument("--config-pattern", default="configs/walkforward/fold{fold}.yaml",
+                    help="Config file per fold; {fold} is replaced by the fold number.")
     args = ap.parse_args()
+    os.environ["BATCH1_CONFIG"] = args.config_pattern
     set_overrides_env(args.set)
     os.environ[SMOOTH_ENV] = str(args.rl_smooth)
     os.environ[GUARD_ENV] = args.rl_guard

@@ -1,0 +1,109 @@
+data:
+  source: csv
+  path: data/walkforward/fold3.csv
+  test_frac: 0.136364
+  val_frac: 0.1
+  volume_profile_path: configs/stage3/profile_fold3.csv
+  tickers:
+  - cvx
+  - nvda
+  - tsla
+market:
+  avg_daily_volume: 1848396.80870445
+  avg_spread_bps: 3.46968148
+  volatility_per_min: 0.00092509
+  eta_temporary: 0.0005
+  gamma_permanent: 7.5678e-06
+  permanent_impact_exponent: 0.18
+  impact_exponent: 0.65
+  spread_impact_exp: 0.3
+  vol_impact_exp: 0.4
+  spread_widening_factor: 1.69
+  book_depth_levels: 10
+  book_replenish_halflife: 5
+  max_participation_rate: 0.25
+  adverse_selection_factor: 0.3
+  calm_vol: 0.00037805
+  volatile_vol: 0.00136675
+  prob_calm_to_volatile: 0.02108865
+  prob_volatile_to_calm: 0.05290688
+  hawkes_baseline: 10.0
+  hawkes_alpha: 0.6
+  hawkes_decay: 0.056916
+  news_spread_multiplier: 5.0
+  news_probability: 0.02
+  alpha_horizon_steps: 6
+  alpha_noise_std: 2.0
+  alpha_decay: 0.9
+  alpha_reward_weight: 0.3
+  passive_fill_prob: 0.4
+  permanent_impact_mode: cumulative
+  impact_volume_ref: bar
+  ticker_adv:
+    aapl: 2061349.9
+    bac: 2369063.1
+    cvx: 365312.6
+    googl: 1538326.6
+    jpm: 359759.1
+    msft: 828660.7
+    nvda: 7993300.7
+    pg: 325326.2
+    qqq: 1490723.1
+    spy: 2651342.8
+    tsla: 2407012.5
+    wmt: 907704.2
+    xom: 731277.1
+  spread_source: data
+  vol_source: data
+  vol_window: 15
+execution:
+  drawdown_stop_frac: null
+  total_shares: 100000
+  total_steps: 390
+  step_duration_min: 1
+  max_participation_rate: 0.25
+  risk_aversion: 0.0001
+  action_mode: participation_rate
+  order_size_pct_adv: 0.05
+  enable_passive: false
+  reward_mode: mean_variance
+  action_squash: sigmoid
+  drop_noise_obs: true
+  honest_obs: true
+  urgency_power: 2.0
+  spread_obs_ref: running
+training:
+  total_timesteps: 10000000
+  n_envs: 16
+  n_envs_fast: 64
+  n_steps: 512
+  batch_size: 512
+  n_epochs: 10
+  learning_rate: 0.0001
+  gamma: 0.999
+  ent_coef: 0.01
+  clip_range: 0.2
+  seed: 42
+  log_dir: logs/
+  model_dir: models/
+  eval_freq: 50000
+  n_eval_episodes: 20
+evaluation:
+  n_episodes: 100
+  benchmarks:
+  - twap
+  - vwap
+  - ac
+  - pov5
+  - pov10
+  - pov20
+  plot_dir: evaluation/plots/
+reward_weights:
+  alpha: 0.0
+  disable_alpha_signal: true
+fees:
+  commission_per_share: 0.0005
+  taker_fee_per_share: 0.003
+  sec_fee_bps_sell: 0.278
+  finra_taf_per_share_sell: 0.000166
+  maker_rebate_per_share: 0.002

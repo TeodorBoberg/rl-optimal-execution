@@ -241,6 +241,29 @@ class ExecutionEnv(gym.Env):
         # past trades, which the trader knows.
         self.honest_obs = bool(exec_cfg.get("honest_obs", False))
         self.honest_vol_window = int(exec_cfg.get("honest_vol_window", 15))
+        # STAGE 3b: what the spread inputs are measured against.
+        # "global" (original): the calibrated market.avg_spread_bps. When
+        #   spreads drift wider over time (2.3 -> 3.9 bps across the folds),
+        #   every test-period minute looks "wide" and a policy trained on
+        #   older days waits, falls behind and pays to catch up.
+        # "running": the mean of the quotes seen so far in this order -- the
+        #   same causal reference the spread-aware benchmark (acs) uses.
+        #   Slot 9 becomes the spread relative to that (the timing signal);
+        #   slot 3 becomes the slow level (running mean / avg_spread_bps).
+        self.spread_obs_ref = str(exec_cfg.get("spread_obs_ref", "global"))
+        # STAGE 3b: drop the slow spread-LEVEL input (slot 3). The Stage 3
+        # diagnosis: unguarded low-urgency losses sit almost entirely on
+        # wide-spread test days, where the level input tells the policy to
+        # wait. With aggressive-only orders the spread is paid per share
+        # whatever the timing, so the level carries no timing information.
+        self.drop_spread_level = bool(exec_cfg.get("drop_spread_level", False))
+        # STAGE 3b: the schedule guardrail as part of the environment, so the
+        # policy is TRAINED with the same constraint it is deployed with.
+        # Evaluation scripts still switch it per strategy (rl_guard()): off for
+        # benchmarks, and on for RL only with --rl-guard.
+        tg = exec_cfg.get("train_guard_band")
+        self.rl_guard_band = float(tg) if tg is not None else None
+        self.rl_guard_steps = int(exec_cfg.get("train_guard_steps", 10))
         if self.honest_obs:
             self.hide_state_obs = True
 
@@ -355,6 +378,11 @@ class ExecutionEnv(gym.Env):
         self.total_steps = exec_cfg["total_steps"]
         self.default_side = side
         self.default_urgency = urgency   # None = randomize
+        # STAGE 3: urgency = U ** urgency_power when randomised (training).
+        # 1 = uniform (original). 2 puts half of all episodes below u = 0.25,
+        # so patient orders are no longer rare and the low-urgency failure
+        # the eval-time guardrail patches is trained against directly.
+        self.urgency_power = float(exec_cfg.get("urgency_power", 1.0))
         # Per-step position cap, as a fraction of the ORIGINAL total order
         # size. Configurable (defaults to the original hardcoded 0.15) so
         # this can be tested/tuned without silently changing behavior for
@@ -415,7 +443,17 @@ class ExecutionEnv(gym.Env):
             hawkes_decay=market_cfg_dict.get("hawkes_decay", 0.3),
             news_spread_multiplier=market_cfg_dict.get("news_spread_multiplier", 2.0),
             news_probability=market_cfg_dict.get("news_probability", 0.005),
+            spread_source=market_cfg_dict.get("spread_source", "model"),
+            vol_source=market_cfg_dict.get("vol_source", "model"),
+            vol_window=int(market_cfg_dict.get("vol_window", 15)),
+            spread_floor_bps=float(market_cfg_dict.get("spread_floor_bps", 0.5)),
         )
+        # STAGE 3: per-ticker ADV measured on the TRAINING days only
+        # (written by evaluation/calibrate_fold.py). Overrides the ticker_adv
+        # column, which load_csv_data computes over every day in the file --
+        # including the test days.
+        self.ticker_adv_map = {str(k): float(v) for k, v in
+                               (market_cfg_dict.get("ticker_adv") or {}).items()}
 
         self.rng = np.random.default_rng()
         self.sim = MarketSimulator(self.market_cfg, rng=self.rng)
@@ -435,6 +473,23 @@ class ExecutionEnv(gym.Env):
                     step_duration_min=exec_cfg["step_duration_min"],
                 )
                 self.data = generate_intraday_data(syn_cfg)
+
+        # STAGE 3: ticker filters (unseen-stock test). data.tickers keeps only
+        # those tickers, data.exclude_tickers drops them. Days are renumbered
+        # 0..n-1 afterwards because reset() draws day ids from that range.
+        dcfg = cfg.get("data", {}) or {}
+        keep, drop = dcfg.get("tickers"), dcfg.get("exclude_tickers")
+        if (keep or drop) and "ticker" in self.data.columns:
+            m = np.ones(len(self.data), dtype=bool)
+            if keep:
+                m &= self.data["ticker"].astype(str).isin([str(t) for t in keep]).values
+            if drop:
+                m &= ~self.data["ticker"].astype(str).isin([str(t) for t in drop]).values
+            d = self.data[m].copy()
+            if len(d) == 0:
+                raise ValueError(f"ticker filter left no data (tickers={keep}, exclude={drop})")
+            d["day"] = pd.factorize(d["day"], sort=True)[0]
+            self.data = d.reset_index(drop=True)
 
         self.n_days = self.data["day"].nunique()
 
@@ -486,7 +541,7 @@ class ExecutionEnv(gym.Env):
 
         # Randomize urgency — sample from full range each episode
         if self.default_urgency is None:
-            self.urgency = float(self.rng.uniform(0.0, 1.0))
+            self.urgency = float(self.rng.uniform(0.0, 1.0)) ** self.urgency_power
         else:
             self.urgency = float(self.default_urgency)
 
@@ -507,6 +562,11 @@ class ExecutionEnv(gym.Env):
         # has it (see synthetic_data.py's load_csv_data), instead of the one
         # global config value applied uniformly to every ticker. The config
         # value remains the fallback for synthetic/no-ticker-info data.
+        if self.ticker_adv_map and "ticker" in day_data.columns and len(day_data) > 0:
+            t = str(day_data["ticker"].iloc[0])
+            if t in self.ticker_adv_map:
+                day_data = day_data.copy()
+                day_data["ticker_adv"] = self.ticker_adv_map[t]
         if "ticker_adv" in day_data.columns and len(day_data) > 0:
             self.sim.cfg.avg_daily_volume = float(day_data["ticker_adv"].iloc[0])
 
@@ -541,6 +601,7 @@ class ExecutionEnv(gym.Env):
         self._mv_prev_cost = 0.0
         self._prev_fill_qty = None
         self._mid_hist = []
+        self._obs_qs_hist = []
         self.fills = []
 
         return self._get_obs(), {}
@@ -601,9 +662,9 @@ class ExecutionEnv(gym.Env):
             action_frac = min(action_frac, urgency_max_action)
             qty = action_frac * self.remaining
 
-        # Schedule guardrail (evaluation wrapper for the RL agent only; set
-        # by the evaluation scripts, never during training, never for
-        # benchmarks). If the order has fallen more than rl_guard_band of its
+        # Schedule guardrail (for the RL agent only; set by the evaluation
+        # scripts, never for benchmarks; during training only when the config
+        # sets execution.train_guard_band -- Stage 3b). If the order has fallen more than rl_guard_band of its
         # size behind a straight-line (TWAP) pace, trade at least enough to
         # close that excess over the next rl_guard_steps minutes. It only ever
         # ADDS to what the policy chose. This is the standard risk control a
@@ -975,13 +1036,21 @@ class ExecutionEnv(gym.Env):
                 rv = float(np.std(np.diff(np.log(p))))
             else:
                 rv = self.market_cfg.volatility_per_min
+            self._last_rv = rv          # also read by the volatility-aware benchmark
             regime_ind = float(np.clip(rv / (self.market_cfg.volatility_per_min + 1e-12) / 3.0, 0, 1))
-            lob = self.sim.lob
-            if lob is not None:
-                q_spread = (lob.best_ask - lob.best_bid) / (lob.mid_price + 1e-12) * 1e4
+            q_spread = self.quoted_spread_bps()
+            if self.spread_obs_ref == "running":
+                qh = getattr(self, "_obs_qs_hist", None)
+                if qh is None:
+                    qh = self._obs_qs_hist = []
+                qh.append(q_spread)
+                typical = float(np.mean(qh))
+                news_ind = float(np.clip(q_spread / (typical + 1e-9) / 5.0, 0, 1))
+                lagged_spread_bps = typical / (self.market_cfg.avg_spread_bps + 1e-9) * 10.0 / 5.0
+                if self.drop_spread_level:
+                    lagged_spread_bps = 0.0
             else:
-                q_spread = self.market_cfg.avg_spread_bps
-            news_ind = float(np.clip(q_spread / (self.market_cfg.avg_spread_bps + 1e-9) / 5.0, 0, 1))
+                news_ind = float(np.clip(q_spread / (self.market_cfg.avg_spread_bps + 1e-9) / 5.0, 0, 1))
 
         return np.array([
             self.remaining / self.total_shares,
@@ -1111,14 +1180,23 @@ class ExecutionEnv(gym.Env):
         return self._to_action(frac)
 
     def quoted_spread_bps(self) -> float:
-        """Current quoted spread from the book -- public before trading."""
+        """Current quoted spread from the book -- public before trading.
+
+        Data mode (market.spread_source = data): the previous minute's
+        spread, because the current bar's spread_bps is an average over the
+        minute about to be traded."""
+        if self.market_cfg.spread_source == "data":
+            prev = getattr(self.sim, "prev_spread_bps", None)
+            if prev is not None and np.isfinite(prev):
+                return float(prev)
         lob = self.sim.lob
         if lob is None:
             return float(self.market_cfg.avg_spread_bps)
         return float((lob.best_ask - lob.best_bid) / (lob.mid_price + 1e-12) * 1e4)
 
     def ac_volume_clock_action(self, risk_aversion: float, volume_profile: np.ndarray,
-                               live: bool = False, spread_k: float = 0.0) -> np.ndarray:
+                               live: bool = False, spread_k: float = 0.0,
+                               vol_k: float = 0.0) -> np.ndarray:
         """Almgren-Chriss run on a VOLUME clock instead of a time clock.
 
         When temporary impact is priced against each minute's actual volume
@@ -1180,6 +1258,18 @@ class ExecutionEnv(gym.Env):
             hist.append(q)
             typical = float(np.mean(hist))
             frac = frac * (typical / max(q, 1e-9)) ** spread_k
+        if vol_k > 0:
+            # STAGE 3c: volatility-aware variant, distilled from what the agent
+            # does (behaviour_probe): trade less when recent volatility is high.
+            # Scale by (typical rv / current rv) ** vol_k, where rv is the same
+            # 15-minute realised volatility the agent observes and typical is
+            # its running mean over this order (causal).
+            rv = float(getattr(self, "_last_rv", self.market_cfg.volatility_per_min))
+            vh = getattr(self, "_rv_hist", None)
+            if vh is None or self.step_count == 0:
+                vh = self._rv_hist = []
+            vh.append(rv)
+            frac = frac * (float(np.mean(vh)) / max(rv, 1e-12)) ** vol_k
         return self._to_action(float(np.clip(frac, 0.0, 1.0)))
 
     def ac_action(self, risk_aversion: float = None) -> np.ndarray:

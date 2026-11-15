@@ -118,6 +118,21 @@ class MarketConfig:
     alpha_horizon_steps: int = 6          # look-ahead window, in steps, the signal predicts
     alpha_noise_std: float = 2.0          # higher = noisier/less informative signal (~62% directional accuracy)
     alpha_decay: float = 0.9              # how much true forward return bleeds into the signal
+    # STAGE 3: where spread and volatility come from.
+    # "model" (original): spread = avg_spread_bps x U-shape x vol x depth x
+    #   random news spikes; volatility from a 2-state Markov regime model.
+    #   The spread the strategies PAY therefore has the model's variation,
+    #   not the market's.
+    # "data": the spread paid each minute is that minute's real quoted
+    #   spread (spread_bps column), still widened by the order's own depth
+    #   depletion (Hawkes); no synthetic news spikes. Volatility is the
+    #   realised volatility of the real midpoint over the last vol_window
+    #   minutes (past only). The variation then matches the data by
+    #   construction, and evaluation/measure_spread.py checks it.
+    spread_source: str = "model"
+    vol_source: str = "model"
+    vol_window: int = 15
+    spread_floor_bps: float = 0.5
 
 
 # ------------------------------------------------------------------
@@ -534,6 +549,7 @@ class MarketSimulator:
         self.hawkes.reset()
         self.spread_model.reset()
         self.current_vol = self.cfg.volatility_per_min
+        self.__dict__.pop("last_spread_bps", None)   # new day: no previous book yet
         self._compute_alpha_signals()
         self._rebuild_lob()
         return self.mid_price
@@ -597,11 +613,24 @@ class MarketSimulator:
         # Book depth ratio from Hawkes
         depth_ratio = self.hawkes.liquidity_multiplier
 
-        spread = self.spread_model.compute(
-            self.step_idx,
-            realised_vol_ratio,
-            depth_ratio,
-        )
+        if self.cfg.spread_source == "data" and "spread_bps" in self.day_data.columns:
+            real = float(row["spread_bps"])
+            if not np.isfinite(real) or real <= 0:
+                real = self.cfg.avg_spread_bps
+            depth_mult = 1.0 / np.clip(depth_ratio, 0.2, 2.0) ** 0.3
+            spread = float(np.clip(real * depth_mult, self.cfg.spread_floor_bps, 100.0))
+            self.spread_model.is_news_window = False
+        else:
+            spread = self.spread_model.compute(
+                self.step_idx,
+                realised_vol_ratio,
+                depth_ratio,
+            )
+        # Spread of the PREVIOUS minute's book: what a strategy can actually
+        # see before deciding (data mode -- the bar's own spread is an
+        # average over the coming minute).
+        self.prev_spread_bps = getattr(self, "last_spread_bps", spread)
+        self.last_spread_bps = spread
 
         self.lob = LimitOrderBook(
             mid_price=self.mid_price,
@@ -820,7 +849,12 @@ class MarketSimulator:
         row = self.day_data.loc[self.step_idx]
 
         # Update regime and volatility
-        self.current_vol, self.current_regime = self.regime_model.step_vol()
+        if self.cfg.vol_source == "data":
+            self.current_vol = self._data_vol()
+            mid = 0.5 * (self.cfg.calm_vol + self.cfg.volatile_vol)
+            self.current_regime = "volatile" if self.current_vol > mid else "calm"
+        else:
+            self.current_vol, self.current_regime = self.regime_model.step_vol()
 
         # Price evolution: market move + permanent impact already baked in
         prev_close = float(self.ref_price[max(0, self.step_idx - 1)])
@@ -837,6 +871,17 @@ class MarketSimulator:
             self.mid_price = self.mid_price * np.exp(market_ret + noise * 0.1)
 
         self._rebuild_lob()
+
+    def _data_vol(self) -> float:
+        """Realised 1-minute volatility of the real midpoint, last vol_window bars (past only)."""
+        i = self.step_idx
+        w = max(2, int(self.cfg.vol_window))
+        p = self.ref_price[max(0, i - w):i + 1]
+        if len(p) < 6:          # fewer than 5 returns at the open: use the calibrated level
+            return float(self.cfg.volatility_per_min)
+        r = np.diff(np.log(np.maximum(p, 1e-9)))
+        v = float(np.std(r))
+        return v if np.isfinite(v) and v > 0 else float(self.cfg.volatility_per_min)
 
     @property
     def current_state(self) -> dict:

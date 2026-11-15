@@ -1,5 +1,17 @@
 """
 agent/train.py — PPO trainer with buy/sell support and real data
+
+v10 infrastructure changes:
+  * FIX: the checkpoint-selection environment (EvalCallback) used the TEST
+    split, even when data.val_frac was set -- val_df was computed and never
+    used. best_model.zip was therefore chosen on test-period episodes. It now
+    uses the validation tail of the training window (val_frac), and refuses to
+    run without one unless allow_test_selection is passed explicitly.
+  * Per-run output folders (model_dir / log_dir overrides) so several
+    trainings can run at the same time without overwriting each other.
+  * device ("cpu" / "cuda") and torch thread count are settable.
+  * eval_freq / n_eval_episodes overridable (evaluation is single-env and can
+    take a large share of wall time -- see evaluation/bench_train.py).
 """
 
 import argparse
@@ -56,29 +68,43 @@ def make_env_fn(cfg: dict, data, seed: int = 0, side: str = "random"):
     return _init
 
 
-def train(cfg: dict, total_timesteps: int = None):
+def train(cfg: dict, total_timesteps: int = None, model_dir: str = None, log_dir: str = None,
+          device: str = "cpu", torch_threads: int = None, n_envs: int = None,
+          eval_freq: int = None, n_eval_episodes: int = None, checkpoints: bool = True,
+          allow_test_selection: bool = False, progress_bar: bool = True, extra_callbacks=None):
+    import torch
+    if torch_threads:
+        torch.set_num_threads(int(torch_threads))
+
     train_cfg = cfg["training"]
     n_timesteps = total_timesteps or train_cfg["total_timesteps"]
-    n_envs = train_cfg["n_envs"]
+    n_envs = int(n_envs or train_cfg["n_envs"])
     seed = train_cfg["seed"]
 
-    log_dir = Path(train_cfg["log_dir"])
-    model_dir = Path(train_cfg["model_dir"])
+    log_dir = Path(log_dir or train_cfg["log_dir"])
+    model_dir = Path(model_dir or train_cfg["model_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Training PPO agent (buy + sell, {n_envs} parallel envs)")
+    print(f"Training PPO agent (buy + sell, {n_envs} parallel envs, device={device}, "
+          f"torch threads={torch.get_num_threads()})")
     print(f"  Timesteps : {n_timesteps:,}")
+    print(f"  Output    : {model_dir}")
     print()
 
     train_df, test_df = load_and_split_data(cfg)
 
-        # Pick the best checkpoint on the end of the TRAINING window, never on test.
+    # Pick the best checkpoint on the end of the TRAINING window, never on test.
     val_frac = cfg["data"].get("val_frac")
     if val_frac:
         train_df, val_df = train_test_split_days(train_df, test_frac=val_frac)
-    else:
+        sel_name = f"validation tail of the training window (val_frac={val_frac})"
+    elif allow_test_selection:
         val_df = test_df
+        sel_name = "TEST split (allow_test_selection -- for reproducing old runs only)"
+    else:
+        raise SystemExit("data.val_frac is not set: refusing to select checkpoints on the test split.")
+    print(f"  Checkpoint selection on: {sel_name}")
 
     env = make_vec_env(
         make_env_fn(cfg, train_df, seed=seed, side="random"),
@@ -87,7 +113,7 @@ def train(cfg: dict, total_timesteps: int = None):
         vec_env_cls=SubprocVecEnv,
     )
     eval_env = make_vec_env(
-        make_env_fn(cfg, test_df, seed=seed + 9999, side="random"),
+        make_env_fn(cfg, val_df, seed=seed + 9999, side="random"),
         n_envs=1,
         seed=seed + 9999,
     )
@@ -106,34 +132,38 @@ def train(cfg: dict, total_timesteps: int = None):
         tensorboard_log=str(log_dir),
         seed=seed,
         policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])),
-        device="cpu",
+        device=device,
     )
 
-    callbacks = [
-        EvalCallback(
+    ef = int(eval_freq if eval_freq is not None else train_cfg.get("eval_freq", 10_000))
+    callbacks = []
+    if ef > 0:
+        callbacks.append(EvalCallback(
             eval_env,
             best_model_save_path=str(model_dir),
             log_path=str(log_dir),
-            eval_freq=max(train_cfg.get("eval_freq", 10_000) // n_envs, 1),
-            n_eval_episodes=train_cfg.get("n_eval_episodes", 20),
+            eval_freq=max(ef // n_envs, 1),
+            n_eval_episodes=int(n_eval_episodes or train_cfg.get("n_eval_episodes", 20)),
             deterministic=True,
             verbose=1,
-        ),
-        CheckpointCallback(
+        ))
+    if checkpoints:
+        callbacks.append(CheckpointCallback(
             save_freq=max(50_000 // n_envs, 1),
             save_path=str(model_dir / "checkpoints"),
             name_prefix="ppo_exec",
-        ),
-    ]
+        ))
+    callbacks += list(extra_callbacks or [])
 
     model.learn(
         total_timesteps=n_timesteps,
         callback=callbacks,
-        progress_bar=True,
+        progress_bar=progress_bar,
     )
 
     final_path = str(model_dir / "final_model")
     model.save(final_path)
+    env.close()
     print(f"\nDone. Model saved to {final_path}.zip")
     return model
 

@@ -54,6 +54,7 @@ ACL_GRID = [0.01, 0.05, 0.2, 0.6, 1.0, 1.5, 2.5, 5.0, 10.0, 20.0]
 ACS_K = [0.5, 1.0, 2.0]
 ACS_GRID = [0.01, 0.05, 0.2, 0.6, 1.5, 5.0, 20.0]
 BENCH_FILTER_ENV = "BATCH1_BENCH_PREFIXES"
+BENCH_GUARD_ENV = "BATCH1_BENCH_GUARD"     # band,steps for the guarded benchmark families (g...)
 NO_RL_ENV = "BATCH1_NO_RL"
 POV_GRID = [5, 7.5, 10, 12.5, 15, 17.5, 20, 22.5, 25]
 TRACE_BENCHMARKS = ["twap", "pov@20"]
@@ -68,6 +69,7 @@ def load_config(path):
 
 OVERRIDE_ENV = "BATCH1_CFG_OVERRIDES"
 SMOOTH_ENV = "BATCH1_RL_SMOOTH"
+CONFIG_ENV = "BATCH1_CONFIG"           # config path pattern with {fold}; default walkforward
 GUARD_ENV = "BATCH1_RL_GUARD"          # "band,steps", e.g. "0.1,10"; empty = off
 
 
@@ -134,9 +136,23 @@ def benchmark_specs():
     specs += [(f"acv@{ra:g}", "acv", ra) for ra in ACV_GRID]
     specs += [(f"acl@{ra:g}", "acl", ra) for ra in ACL_GRID]
     specs += [(f"acs{k:g}@{ra:g}", "acs", (ra, k)) for k in ACS_K for ra in ACS_GRID]
+    # STAGE 3c: the same schedules inside the SAME guardrail as the agent
+    # (5% band around a straight-line pace, catch up over 10 minutes). The
+    # agent is only ever evaluated with the guardrail, so its fair rivals
+    # are guarded too. Only run when asked for (--bench-prefixes g...).
+    specs += [(f"gac@{ra:g}", "g:ac", ra) for ra in AC_GRID]
+    specs += [(f"gacl@{ra:g}", "g:acl", ra) for ra in ACL_GRID]
+    specs += [(f"gacs{k:g}@{ra:g}", "g:acs", (ra, k)) for k in ACS_K for ra in ACS_GRID]
+    # STAGE 3c: rules distilled from the agent's behaviour -- guarded live-volume
+    # AC that also trades less when recent volatility is high (gacv), and the
+    # same plus the spread rule k=1 (gacs1v).
+    specs += [(f"gacv{kv:g}@{ra:g}", "g:acsv", (ra, 0.0, kv)) for kv in (0.5, 1.0) for ra in ACS_GRID]
+    specs += [(f"gacs1v{kv:g}@{ra:g}", "g:acsv", (ra, 1.0, kv)) for kv in (0.5, 1.0) for ra in ACS_GRID]
     keep = [x for x in os.environ.get(BENCH_FILTER_ENV, "").split(",") if x.strip()]
     if keep:
         specs = [sp for sp in specs if any(sp[0].startswith(pre) for pre in keep)]
+    else:
+        specs = [sp for sp in specs if not sp[1].startswith("g:")]
     return specs
 
 
@@ -151,6 +167,11 @@ def _worker_init():
     torch.set_num_threads(1)
 
 
+def config_path(fold):
+    pat = os.environ.get(CONFIG_ENV, "") or "configs/walkforward/fold{fold}.yaml"
+    return pat.format(fold=fold)
+
+
 def _fold_objects(fold, seeds, prefix):
     if fold in _CACHE:
         return _CACHE[fold]
@@ -161,7 +182,7 @@ def _fold_objects(fold, seeds, prefix):
     from simulator.data_split import train_test_split_days
     from stable_baselines3 import PPO
 
-    cfg = apply_overrides(load_config(f"configs/walkforward/fold{fold}.yaml"))
+    cfg = apply_overrides(load_config(config_path(fold)))
     data_cfg, exec_cfg = cfg["data"], cfg["execution"]
     full_df = load_csv_data(data_cfg["path"], exec_cfg["step_duration_min"])
     with contextlib.redirect_stdout(io.StringIO()):          # split prints a table per call
@@ -174,7 +195,11 @@ def _fold_objects(fold, seeds, prefix):
         p = f"models/{prefix}_f{fold}_s{s}.zip"
         if os.path.exists(p):
             models[s] = PPO.load(p, device="cpu")
-    profile = load_empirical_volume_profile(n_steps=env.total_steps)
+    # STAGE 3: a per-fold profile measured on training days only, if the
+    # config names one; otherwise the original full-sample profile.
+    pp = data_cfg.get("volume_profile_path")
+    profile = (load_empirical_volume_profile(pp, n_steps=env.total_steps) if pp
+               else load_empirical_volume_profile(n_steps=env.total_steps))
     _CACHE[fold] = (cfg, env, models, profile)
     return _CACHE[fold]
 
@@ -194,6 +219,9 @@ def _bench_action(env, kind, param, profile):
     if kind == "acs":
         ra, k = param
         return env.ac_volume_clock_action(ra, profile, live=True, spread_k=k)
+    if kind == "acsv":
+        ra, k, kv = param
+        return env.ac_volume_clock_action(ra, profile, live=True, spread_k=k, vol_k=kv)
     if kind in ("acv", "acl"):
         return env.ac_volume_clock_action(param, profile, live=(kind == "acl"))
     raise ValueError(kind)
@@ -276,6 +304,12 @@ def paired_job(job):
 
         rl_guard(env, False)
         for name, kind, param in specs:
+            if kind.startswith("g:"):
+                band, steps = (os.environ.get(BENCH_GUARD_ENV, "") or "0.05,10").split(",")
+                env.rl_guard_band, env.rl_guard_steps = float(band), int(steps)
+                kind = kind[2:]
+            else:
+                env.rl_guard_band = None
             tr = [] if (want_trace and name in TRACE_BENCHMARKS) else None
             r = run_episode(env, side, ep_seed,
                             lambda o, k=kind, p=param: _bench_action(env, k, p, profile),
@@ -287,6 +321,7 @@ def paired_job(job):
                     t.update(fold=fold, side=side, episode=ep, strategy=name, model_seed=-1)
                 traces.extend(tr)
 
+        env.rl_guard_band = None
         rl_guard(env, True)
         for s, model in (models.items() if not os.environ.get(NO_RL_ENV) else []):
             tr = [] if want_trace else None
@@ -355,18 +390,25 @@ def main():
     ap.add_argument("--bench-prefixes", default="",
                     help="Only run benchmarks whose name starts with one of these "
                          "comma-separated prefixes (e.g. 'acs').")
+    ap.add_argument("--bench-guard", default="0.05,10", metavar="BAND,STEPS",
+                    help="Guardrail for the guarded benchmark families (gac, gacl, gacs).")
     ap.add_argument("--no-rl", action="store_true",
                     help="Benchmarks only; do not run the trained policies.")
     ap.add_argument("--append", action="store_true",
                     help="Add the new rows to an existing --out/episodes.csv (same "
                          "episodes, same overrides) instead of overwriting it.")
+    ap.add_argument("--config-pattern", default="configs/walkforward/fold{fold}.yaml",
+                    help="Config file per fold; {fold} is replaced by the fold number "
+                         "(e.g. configs/stage3/fold{fold}.yaml).")
     args = ap.parse_args()
+    os.environ[CONFIG_ENV] = args.config_pattern
     set_overrides_env(args.set)
     if args.set:
         print("Config overrides:", ", ".join(args.set))
     os.environ[SMOOTH_ENV] = str(args.rl_smooth)
     os.environ[GUARD_ENV] = args.rl_guard
     os.environ[BENCH_FILTER_ENV] = args.bench_prefixes
+    os.environ[BENCH_GUARD_ENV] = args.bench_guard
     if args.no_rl:
         os.environ[NO_RL_ENV] = "1"
     mine = "overrides: " + (", ".join(args.set) if args.set else "none")
@@ -382,8 +424,8 @@ def main():
     seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
 
     for f in folds:
-        if not os.path.exists(f"configs/walkforward/fold{f}.yaml"):
-            raise SystemExit(f"Missing configs/walkforward/fold{f}.yaml")
+        if not os.path.exists(config_path(f)):
+            raise SystemExit(f"Missing {config_path(f)}")
         found = [s for s in seeds if os.path.exists(f"models/{args.model_prefix}_f{f}_s{s}.zip")]
         print(f"fold {f}: models for seeds {found}")
         if not found and not args.no_rl:

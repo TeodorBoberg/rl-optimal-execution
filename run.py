@@ -39,6 +39,17 @@ def main():
                          help="Override training.seed from config. Distinct from --seed, "
                               "which controls BACKTEST episode sampling. Used for the "
                               "training-seed variance study.")
+    # v10 infrastructure: per-run output, device, threads; --train-only skips
+    # the old backtest/TCA phases (evaluation is done by evaluation/batch1_eval.py)
+    parser.add_argument("--model-dir",  default=None, help="Override training.model_dir (per-run folder)")
+    parser.add_argument("--log-dir",    default=None, help="Override training.log_dir")
+    parser.add_argument("--device",     default="cpu", choices=["cpu", "cuda", "auto"])
+    parser.add_argument("--torch-threads", type=int, default=None)
+    parser.add_argument("--n-envs",     type=int, default=None)
+    parser.add_argument("--eval-freq",  type=int, default=None, help="0 = no checkpoint selection")
+    parser.add_argument("--no-checkpoints", action="store_true")
+    parser.add_argument("--no-progress", action="store_true")
+    parser.add_argument("--train-only", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -55,9 +66,14 @@ def main():
         if args.train_seed is not None:
             cfg["training"]["seed"] = args.train_seed
             print(f"Overriding training seed -> {args.train_seed}")
-        train(cfg, total_timesteps=timesteps)
+        train(cfg, total_timesteps=timesteps, model_dir=args.model_dir, log_dir=args.log_dir,
+              device=args.device, torch_threads=args.torch_threads, n_envs=args.n_envs,
+              eval_freq=args.eval_freq, checkpoints=not args.no_checkpoints,
+              progress_bar=not args.no_progress)
     else:
         print("Skipping training.")
+    if args.train_only:
+        return
 
     # ----------------------------------------------------------------
     # 2. Backtest — already uses the same LOB simulator via ExecutionEnv,
